@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 import os
 from scipy.optimize import curve_fit
 from scipy import integrate as ig
+from scipy.interpolate import interp1d
 
 # Import Important Parameters
 
@@ -16,7 +17,7 @@ k = 1.3806 * 10**(-23) # [kgm^2/s^2K]
 k_eV = 8.6173*10**(-5) # eV / K
 q = 1.60217662 * 10**(-19) # [C]
 q_eV = 1
-Vth = k_eV*T/q_eV # thermSal voltage [V]
+Vth = k_eV*T/q_eV # thermal voltage [eV]
 
 
 # Black-body spectrum
@@ -45,7 +46,7 @@ def getAM15():
     :return: EE: list of energy values (in eV) [list?]
              AM15flux: list of AM1.5 photon flux (in 1/(eV*s*cm^2)) [list?]
     """
-    filePath = '\ASTMG173.csv'# 1:wavelength [nm], 3:AM15g spectral power [W/(m^2nm)]
+    filePath = 'ASTMG173.csv'# 1:wavelength [nm], 3:AM15g spectral power [W/(m^2nm)]
     dataRaw = pd.read_csv(filePath, names=('wavelength','ignore1','AM15pow','ignore2'),skiprows = 2)
     wavelength = dataRaw['wavelength']*1e-9 # nm
     AM15pow = dataRaw['AM15pow']*1e5  # AM1.5 W*cm-2*m-1 (in file: W/(m^2nm))
@@ -71,30 +72,62 @@ def SQ(Eg):
 
     Jsc = -1e3*q*ig.simps(AM15flux[energy>=Eg],energy[energy>=Eg]) # mA/cm^2 (- because energy is descending data)
     J0 = -1e-1*q*ig.simps(bbcell['Phi'][energy>=Eg],energy[energy>=Eg]) # mA/cm^2 (bb returns ~1/m^2)
+    
     Voc = Vth*math.log(Jsc/J0+1) # +1 negligible
     Vocnorm=Voc/(Vth)
     FF = (Vocnorm-math.log(Vocnorm+0.72))/(Vocnorm+1) # For accuracy of expression see Neher et al. DOI: 10.1038/srep24861
                                                       # (main & supplement S4) very accurate down to Vocn=5: corresponds to Voc=130mV for nid=1 or Voc=260mV for nid=2
     PCE = FF*Voc*Jsc
     FF = FF*100
+    
     return Voc,Jsc,FF,PCE
 
 
 # Radiative limit of saturation current density
-def J0_rad(E, EQE, phi_bb):
+def J0_rad(EQE_df, phi_bb_df):
     """
     Function to calculate the radiative limit of the saturation current density (J0,rad)
-    :param E: list of float energy values [list]
-    :param EQE: list of EQE spectra, e.g. df_EQE['EQE'] [list]
-    :param phi_bb: list of values of black-body spectrum, e.g. df_bb['Phi'] [list]
+    :param EQE_df: dataFrame of EQE spectra, with columns 'Energy' and 'EQE' [dataFrame of floats]
+    :param phi_bb_df: dataFrame of black-body spectrum, with columns 'Energy' and 'Phi' [dataFrame of floats]
     :return: J0_rad: radiative limit of the saturation current density [float]
     """
-    J0_rad_list = []
-    for n in range(1,len(E)):
-        j0 = q*EQE[n]*phi_bb[n]*(E[n-1]-E[n])
-        J0_rad_list.append(j0) # [A / m^2]
-        J0_rad = np.sum(J0_rad_list)/10 # [mA / cm^2]
-    return J0_rad
+    
+    EQE_intp = interp1d(EQE_df['Energy'].values, EQE_df['EQE'].values)
+    Phi_intp = interp1d(phi_bb_df['Energy'].values, phi_bb_df['Phi'].values)
+
+#     J0_rad_list = []    
+#     for n in range(1,len(EQE_df['Energy'])):
+#         j0_rad = q*EQE_df['EQE'][n]*phi_bb_df['Phi'][n]*(EQE_df['Energy'][n-1]-EQE_df['Energy'][n])
+#         J0_rad_list.append(j0_rad) # [A / m^2]
+#         J0_rad = np.sum(J0_rad_list)/10 # [mA / cm^2]
+        
+    result = ig.quad(lambda e: q*EQE_intp(e)*Phi_intp(e), min(EQE_df['Energy']), max(EQE_df['Energy']))
+    J0_rad_integral = result[0]/10 # result[0] = integral result, result[1] = estimate of the absolute error on the result
+    return J0_rad_integral
+
+
+# Limit of saturation current density
+def J0(EQE_df, phi_bb_df, EQE_EL):
+    """
+    Function to calculate the limit of the saturation current density (J0,rad)
+    :param EQE_df: dataFrame of EQE spectra, with columns 'Energy' and 'EQE' [dataFrame of floats]
+    :param phi_bb_df: dataFrame of black-body spectrum, with columns 'Energy' and 'Phi' [dataFrame of floats]
+    :param EQE_EL: LED quantum efficiency [float]
+    :return: J0: limit of the saturation current density [float]
+    """
+    
+    EQE_intp = interp1d(EQE_df['Energy'].values, EQE_df['EQE'].values)
+    Phi_intp = interp1d(phi_bb_df['Energy'].values, phi_bb_df['Phi'].values)    
+
+#     J0_list = []
+#     for n in range(1,len(EQE_df['Energy'])):
+#         j0 = (q/EQE_EL)*EQE_df['EQE'][n]*phi_bb_df['Phi'][n]*(EQE_df['Energy'][n-1]-EQE_df['Energy'][n])
+#         J0_list.append(j0) # [A / m^2]
+#         J0 = np.sum(J0_list)/10 # [mA / cm^2]
+
+    result = ig.quad(lambda e: (q/EQE_EL)*EQE_intp(e)*Phi_intp(e), min(EQE_df['Energy']), max(EQE_df['Energy']))
+    J0_integral = result[0]/10 # result[0] = integral result, result[1] = estimate of the absolute error on the result
+    return J0_integral
 
 
 # Radiative limit of the open-circuit voltage
@@ -113,23 +146,47 @@ def Voc_rad(Voc, Jsc, J0_rad):
 
 
 # Voltage losses (as defined by Uwe Rau)
-def Vloss_Rau(Eg,Voc_rad,Voc,Jsc):
+def Vloss_Rau(Eg, Voc, Jsc, df=None, voc_rad=None):
     """
     Function to calculate Shockley-Queisser Voc, voltage losses due to Jsc, radiative, and non-radiative recombination as defined by Rau
     :param Eg: reference energy (could be inflection point of lin. EQE, optical gap, or E_CT) [float]
-    :param Voc_rad: Radiative upper limit of Voc, calculated from sEQE / EL [float]
     :param Voc: open-circuit voltage [float]
     :param Jsc: short-circuit current [float]
+    :param df: EQE data with columns 'Energy' and 'EQE' [dataFrame]
+    :param Voc_rad: Radiative upper limit of Voc, calculated from sEQE / EL [float]
     :return: Voc_SQ: Voc Shockley-Queisser limit [float]
              DeltaV_sc: Losses due to non-ideal Jsc [float]
              Delta_V_rad: Radiative losses [float]
              Delta_V_nonrad: Non-radiative losses [float]
     """
-    Voc_SQ, Jsc_SQ, = SQ(Eg)
+    if voc_rad is None and df is not None:
+        E = df['Energy']
+        bb_df = bb(E)
+        j0_rad = J0_rad(df, bb_df)
+        voc_rad, Delta_V_nonrad = Voc_rad(Voc, Jsc, j0_rad)
+        
+    Voc_SQ, Jsc_SQ, FF_SQ, PCE_SQ = SQ(Eg)
     Delta_V_sc = k*T/q * math.log(Jsc_SQ/Jsc) # losses due to non-ideal Jsc
-    Delta_V_rad = Voc_SQ - Voc_rad - Delta_V_sc # radiative losses
-    Delta_V_nonrad = Voc_rad - Voc # non-radiative losses
+    Delta_V_rad = Voc_SQ - voc_rad - Delta_V_sc # radiative losses
+    Delta_V_nonrad = voc_rad - Voc # non-radiative losses
     return Voc_SQ, Delta_V_sc, Delta_V_rad, Delta_V_nonrad
+
+
+def Vloss_Vandewal(Jsc, ECT, f, l):
+    """
+    Function to calculate the radiative Voc loss defined using CT properties
+    :param Jsc: measured short-circuit current density [float] [mA/cm**2]
+    :param ET: fitted CT state energy [float] [eV]
+    :param f: fitted oscillator strength / pre-absorption factor [float] [ev**2]
+    :param l: fitted reorganization energy [float] [eV]
+    :return: Delta_V_rad: radiative Voc loss [float] [V]
+    """
+
+#     Delta_V_rad = k*T/q * math.log((Jsc*h**3*c**2)/(10*f* (q**2) *q*2*math.pi*(ECT-l)* (q))) # multiplied by q to convert eV to J
+    V_rad = ECT/q_eV + k_eV*T/q_eV * math.log((Jsc*h_eV**3*c**2)/(10*f*q*2*math.pi*(ECT-l))) # multiplied by q to convert eV to J
+    Delta_V_rad_eV = - k_eV*T/q_eV * math.log((Jsc*h_eV**3*c**2)/(10*f*q*2*math.pi*(ECT-l))) # multiplied by q to convert eV to J
+    
+    return V_rad, Delta_V_rad_eV
 
 
 # LED Quantum Efficiency
@@ -145,7 +202,7 @@ def LED_QE(Delta_Voc_nonrad):
 
 # Calculate voltage loss summary
 # ADJUST to include other loss functions!
-def calculate_summary(columns, samples, Voc, Jsc, ECT):
+def calculate_summary(columns, samples, Voc, Jsc, ECT, EIP, f, l):
     """
     Function to calculate summary dataFrame
     :param columns: list of file names [list of strings]
@@ -153,38 +210,66 @@ def calculate_summary(columns, samples, Voc, Jsc, ECT):
     :param Voc: list of open-circuit voltage [list of floats]
     :param Jsc: list of short-circuit currents [list of floats]
     :param ECT: list of charge-transfer state values [list of floats]
+    :param EIP: list of inflection point values [list of floats]
+    :param f: list of oscillator strength values [list of floats]
+    :param l: list of reorganization energies [list of floats]
     :return: summary: dataFrame of calculated voltage loss values [dataFrame]
     """
     summary = pd.DataFrame()
     j0_list = []
-    voc_rad_list = []
-    delta_voc_nonrad_list = []
     led_QE_list = []
+    voc_rad_list = []
     delta_voc_rad_list = []
-
+    delta_voc_nonrad_list = []
+    
+    Voc_SQ_list = []
+    Delta_V_SC_Rau_list = []
+    Delta_V_rad_Rau_list = []
+    Delta_V_nonrad_Rau_list = []
+    V_rad_Vandewal_list = []
+    Delta_V_rad_Vandewal_list = []
+    
+    
     for n in range(len(samples)):
         df = samples[n]
         E = df['Energy']
         bb_df = bb(E)
 
-        j0_rad = J0_rad(E, df['EQE'], bb_df['Phi'])
+        j0_rad = J0_rad(df, bb_df)
         voc_rad, voc_nonrad = Voc_rad(Voc[n], Jsc[n], j0_rad)
         led_QE = LED_QE(voc_nonrad)
 
-        j0_list.append(j0_rad)
-        voc_rad_list.append(voc_rad)
-        delta_voc_nonrad_list.append(voc_nonrad)
-        led_QE_list.append(led_QE)
-        delta_voc_rad_list.append(ECT[n] - voc_nonrad - Voc[n])
+        j0_list.append(j0_rad) #
+        voc_rad_list.append(voc_rad) #
+        delta_voc_nonrad_list.append(voc_nonrad) #
+        led_QE_list.append(led_QE) #
+        delta_voc_rad_list.append(ECT[n] - voc_nonrad - Voc[n]) #
+        
+        Voc_SQ, Delta_V_SC_Rau, Delta_V_rad_Rau, Delta_V_nonrad_Rau = Vloss_Rau(EIP[n], Voc[n], Jsc[n], df=samples[n])
+        V_rad_Vandewal, Delta_V_rad_Vandewal = Vloss_Vandewal(Jsc[n], ECT[n], f[n], l[n])
+
+        Voc_SQ_list.append(Voc_SQ) #
+        Delta_V_SC_Rau_list.append(Delta_V_SC_Rau) #
+        Delta_V_rad_Rau_list.append(Delta_V_rad_Rau) #
+        Delta_V_nonrad_Rau_list.append(Delta_V_nonrad_Rau) #
+
+        V_rad_Vandewal_list.append(V_rad_Vandewal) #
+        Delta_V_rad_Vandewal_list.append(Delta_V_rad_Vandewal) #
 
     summary['Sample'] = columns
     summary['Jsc [mA/cm2]'] = Jsc
-    summary['J0,rad [mA/cm2]'] = j0_list
-    summary['Voc,rad [V]'] = voc_rad_list
-    summary['Delta Voc, nonrad [V]'] = delta_voc_nonrad_list
-    summary['Delta Voc, rad [V]'] = delta_voc_rad_list
     summary['ECT [V]'] = ECT
     summary['Voc [V]'] = Voc
+    summary['Voc,SQ [V]'] = Voc_SQ_list
+    summary['J0,rad [mA/cm2]'] = j0_list
+    summary['Voc,rad [V]'] = voc_rad_list
+    summary['Voc,rad [V] (Vandewal)'] = V_rad_Vandewal_list
+    summary['Delta Voc,SC [V] (Rau)'] = Delta_V_SC_Rau_list
+    summary['Delta Voc,rad [V] (Rau)'] = Delta_V_rad_Rau_list
+    summary['Delta Voc,rad [V] (Vandewal)'] = Delta_V_rad_Vandewal_list
+    summary['Delta Voc,rad [V] (ECT - Delta Voc,rad)'] = delta_voc_rad_list
+    summary['Delta Voc,nonrad [V]'] = delta_voc_nonrad_list
+    summary['Delta Voc,nonrad [V] (Rau)'] = Delta_V_nonrad_Rau_list
     summary['LED QE'] = led_QE_list
 
     return summary
