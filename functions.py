@@ -44,6 +44,26 @@ def SQ(Eg):
     return Voc,Jsc,FF,PCE
 
 
+# Calculating the short-circuit current density
+def calculate_Jsc(E, EQE): # double check that this is correct!!!
+    """
+    Function to calculate the limit of the short-circuit current density
+    :param E: list of energy values [list of floats]
+    :param EQE: list of EQE values [list of floats]
+    :return: Jsc: short-circuit current density [float]
+    """
+    
+    energy, AM15flux = getAM15() # lists
+
+    EQE_intp = interp1d(E, EQE)
+    AM15_intp = interp1d(energy.values, AM15flux.values)    
+    
+    result = ig.quad(lambda e: q*EQE_intp(e)*AM15_intp(e), min(E), max(E))
+    Jsc = result[0]*(1e3) # to convert into right units?
+    
+    return Jsc
+
+
 # Radiative limit of saturation current density
 def J0_rad(EQE_df, phi_bb_df):
     """
@@ -87,7 +107,7 @@ def J0(EQE_df, phi_bb_df, EQE_EL):
 #         J0 = np.sum(J0_list)/10 # [mA / cm^2]
 
     result = ig.quad(lambda e: (q/EQE_EL)*EQE_intp(e)*Phi_intp(e), min(EQE_df['Energy']), max(EQE_df['Energy']))
-    J0_integral = result[0]/10 # result[0] = integral result, result[1] = estimate of the absolute error on the result
+    J0_integral = result[0]/10 # result[0] = integral result, result[1] = estimate of the absolute error on the result. Divide by 10 to convert from mA/cm2 to A/m2?
     return J0_integral
 
 
@@ -104,6 +124,17 @@ def J0_CT(EQE_EL, ECT, l, f):
     
     J0 = (q/(10*EQE_EL))*f*2*np.pi/(h_eV**3 * c**2)*(ECT-l)*np.exp(-(ECT/(k_eV*T)))
     return J0
+
+
+# Function to calculate Voc
+def Voc(Jsc, J0):
+    """
+    Function to calculate Voc from Jsc and J0
+    :param Jsc: short-circuit current density [float] [mA/cm2]
+    :param J0: saturation current density [float] [A/m2]
+    """
+    Voc = k_eV*T/q_eV * np.log((10*Jsc/J0)+1)
+    return Voc
 
 
 # Radiative limit of the open-circuit voltage
@@ -149,11 +180,11 @@ def Vloss_SQ(Eg, Voc, Jsc, df=None, voc_rad=None):
 
 
 # Voltage losses based on CT properties (as defined by Koen Vandewal)
-def Vloss_CT(Jsc, ECT, f, l):
+def Vloss_CT(Jsc, Voc, ECT, f, l):
     """
     Function to calculate the radiative Voc loss defined using CT properties
     :param Jsc: measured short-circuit current density [float] [mA/cm**2]
-    :param ET: fitted CT state energy [float] [eV]
+    :param ECT: fitted CT state energy [float] [eV]
     :param f: fitted oscillator strength / pre-absorption factor [float] [ev**2]
     :param l: fitted reorganization energy [float] [eV]
     :return: Delta_V_rad: radiative Voc loss [float] [V]
@@ -162,8 +193,23 @@ def Vloss_CT(Jsc, ECT, f, l):
 #     Delta_V_rad = k*T/q * math.log((Jsc*h**3*c**2)/(10*f* (q**2) *q*2*math.pi*(ECT-l)* (q))) # multiplied by q to convert eV to J
     V_rad = ECT/q_eV + k_eV*T/q_eV * math.log((10*Jsc*h_eV**3*c**2)/(f*q*2*math.pi*(ECT-l))) # multiplied by q to convert eV to J
     Delta_V_rad_eV = - k_eV*T/q_eV * math.log((10*Jsc*h_eV**3*c**2)/(f*q*2*math.pi*(ECT-l))) # multiplied by q to convert eV to J
+    Delta_V_nonrad = V_rad - Voc
     
-    return V_rad, Delta_V_rad_eV
+    return V_rad, Delta_V_rad_eV, Delta_V_nonrad
+
+# Function to calculate Voc from CT properties
+def Voc_CT(EQE_EL, Jsc, ECT, f, l, T=300):
+    """
+    Function to calculate the Voc defined using CT properties
+    :param EQE_EL: LED quantum efficiency [float]
+    :param Jsc: measured short-circuit current density [float] [mA/cm**2]
+    :param ECT: fitted CT state energy [float] [eV]
+    :param f: fitted oscillator strength / pre-absorption factor [float] [ev**2]
+    :param l: fitted reorganization energy [float] [eV]
+    :return: Voc: Open circuit voltage [float] [V]
+    """
+    Voc = (ECT/q_eV)+(k_eV*T/q_eV)*np.log((10*Jsc*h_eV**3*c**2)/(f*q*2*np.pi*(ECT-l)))+(k_eV*T)/q_eV * np.log(EQE_EL)
+    return Voc
 
 
 # LED Quantum Efficiency
@@ -210,6 +256,7 @@ def calculate_summary(columns, samples, Voc, Jsc, ECT, Eopt, f, l):
 
     V_rad_CT_list = []
     Delta_V_rad_CT_list = []
+    Delta_V_nonrad_CT_list = []
     
     
     for n in range(len(samples)):
@@ -226,7 +273,7 @@ def calculate_summary(columns, samples, Voc, Jsc, ECT, Eopt, f, l):
         j0 = J0(df, bb_df, led_QE)
         
         Voc_SQ, Delta_V_SC_SQ, Delta_V_rad_SQ, Delta_V_nonrad_SQ = Vloss_SQ(Eopt[n], Voc[n], Jsc[n], df=samples[n])
-        V_rad_CT, Delta_V_rad_CT = Vloss_CT(Jsc[n], ECT[n], f[n], l[n])
+        V_rad_CT, Delta_V_rad_CT, Delta_V_nonrad_CT = Vloss_CT(Jsc[n], Voc[n], ECT[n], f[n], l[n])
         
         j0_CT = J0_CT(led_QE, ECT[n], l[n], f[n])
 
@@ -247,6 +294,7 @@ def calculate_summary(columns, samples, Voc, Jsc, ECT, Eopt, f, l):
 
         V_rad_CT_list.append(V_rad_CT) # Radiative limit based on CT properties
         Delta_V_rad_CT_list.append(Delta_V_rad_CT) # Radiative losses based on CT properties
+        Delta_V_nonrad_CT_list.append(Delta_V_nonrad_CT) # Non-radiative losses based on CT properties
 
     summary['Sample'] = columns
     summary['Voc [V]'] = Voc
@@ -261,6 +309,7 @@ def calculate_summary(columns, samples, Voc, Jsc, ECT, Eopt, f, l):
     summary['Delta Voc,nonrad [V] (Rau)'] = Delta_V_nonrad_SQ_list # Nonradiative losses (should be the same as above)
     summary['Voc,rad [V] (CT properties)'] = V_rad_CT_list  # Radiative limit based on CT properties
     summary['Delta Voc,rad [V] (CT properties)'] = Delta_V_rad_CT_list  # Radiative losses with ECT as upper limit
+    summary['Delta Voc,nonrad [V] (CT properties)'] = Delta_V_nonrad_CT_list # Nonradiative losses based on CT properties
     summary['LED QE'] = led_QE_list # LED Quantum Efficiency
     summary['J0 [mA/cm2]'] = j0_list # Saturation current density
     summary['J0,rad [mA/cm2]'] = j0_rad_list # Radiative saturation current density
