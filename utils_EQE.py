@@ -2,6 +2,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from scipy.interpolate import interp1d
+from collections import defaultdict
+from scipy.optimize import curve_fit
+from utils import linear
 
 # Import Important Parameters
 
@@ -39,11 +42,133 @@ def Marcus_Gaussian(E_, E_CT, l_CT, f_CT, E_opt, l_opt, f_opt, T=300):
     return EQE_df
 
 
+def linear_fit_to_dict(EQE_df, start, stop):
+    """
+    Function to perform linear fit in dictionary
+    :param EQE_df : dataFrame of EQE data [dataFrame]
+    :param start : start index of region to fit [int]
+    :param stop : stop index of region to fit [int]
+    :return data_dict : dictionary of fit information [dict]
+    """
+    
+    data_dict = {}
+    
+    energy_ = EQE_df['Energy'][start:stop]
+    EQE_ =  EQE_df['EQE'][start:stop]
+    ppot, pcov = curve_fit(linear, energy_, np.log10(EQE_)) # Fit selected region
+    
+    data_dict['start_index'] = start
+    data_dict['stop_index'] = stop
+    data_dict['m'] = ppot[0]
+    data_dict['b'] = ppot[1]
+    
+    return data_dict  
+
+
+def extend_EQE(orig_EQE, mode, min_energy=0.5, **kwargs):
+    """
+    Function to extend EQE
+    :param orig_EQE : original EQE [dataFrame]
+    :param min_energy : minimum energy to extend EQE towards [float]
+    :param mode : mode / approach to apply to extend EQE
+                  "interpolation" - requires kwargs "left", "right" (constants to insert left & right [float])
+                  "linear"        - requires kwargs "start", "stop" (min, max energy for linear fit [float])
+                  "inflection"    - requires no kwargs 
+                  "gaussian"      - requires kwargs "CT_df", "n" (dataFrame with CT fit, and sample number [int])
+    :return : EQE_new : interpolated EQE [dataFrame]
+    """
+
+    if mode=='interpolation': # inerpolate & extend EQE with constants
+        
+        left = kwargs['left']
+        right = kwargs['right']
+
+        interp_range=np.linspace(min_energy, max(orig_EQE['Energy'].values), num=840)
+        EQE_interp = np.interp(
+            x=interp_range, 
+            xp=orig_EQE['Energy'][::-1], 
+            fp=orig_EQE['EQE'][::-1], 
+            left=left, 
+            right=right) # Interpolate x-values and extend left/right with constants
+        
+        EQE_new = pd.DataFrame()
+        EQE_new['Energy'] = interp_range
+        EQE_new['EQE'] = EQE_interp
+
+    elif mode=='linear': # Extend low energy regime with linear fit
+        
+        start = kwargs['start']
+        stop= kwargs['stop']
+        
+        # Pick range for linear fit
+        energy_ = orig_EQE['Energy'][orig_EQE['Energy'].between(start, stop)].values
+        EQE_ =  orig_EQE['EQE'][orig_EQE['Energy'].between(start, stop)].values
+
+        ppot, pcov = curve_fit(linear, energy_, np.log10(EQE_)) # Fit selected region
+
+        interp_range = np.arange(min_energy, start, 0.01) # Define range to extend the EQE over
+        EQE_interp = linear(interp_range, ppot[0], ppot[1])
+
+        EQE_new = pd.DataFrame()
+        EQE_new['Energy'] = interp_range[::-1]
+        EQE_new['EQE'] = 10**(EQE_interp[::-1])  
+        
+        stop_EQE = int((orig_EQE['Energy']>start).sum()) # Extract the index where orig_EQE['Energy'] > start
+        EQE_new = orig_EQE[:stop_EQE].append(EQE_new) # removing overlap between linear region & EQE
+        
+    elif mode=='inflection': # Find highest slope between end & inflection point
+        
+        if 'num' in kwargs.keys():
+            num = kwargs['num']
+        else:
+            num = 5
+        
+        infl = calculate_infl_point(orig_EQE) 
+        infl_index = infl['Index']
+        max_index = len(orig_EQE)
+        
+        fit_dict = defaultdict(list)
+        
+        for n in range(max_index - infl_index - num):
+            start = infl_index+n
+            stop = infl_index+num+n
+            
+            data_dict = linear_fit_to_dict(orig_EQE, start, stop)
+            for key, val in data_dict.items():
+                fit_dict[key].append(val)
+
+        df_fit = pd.DataFrame(fit_dict)
+        best_fit_index = df_fit['m'].idxmax()
+        
+        interp_range = np.arange(min_energy, orig_EQE['Energy'][df_fit['stop_index'][best_fit_index]], 0.05)
+        EQE_interp = linear(interp_range, df_fit['m'][best_fit_index], df_fit['b'][best_fit_index])
+       
+        EQE_new = pd.DataFrame()
+        EQE_new['Energy'] = interp_range[::-1]
+        EQE_new['EQE'] = 10**(EQE_interp[::-1])    
+        EQE_new = orig_EQE[:int(df_fit['stop_index'][best_fit_index])].append(EQE_new) 
+
+    elif mode=='gaussian': # Extend the EQE with gaussian CT fit
+        
+        CT_df = kwargs['CT_df']
+        n = kwargs['n']
+        
+        if 'num' in kwargs.keys():
+            num = kwargs['num']
+        else:
+            num = -5
+        
+        EQE_new = wrapper_extend_EQE_CT(CT_df = CT_df, orig_EQE=orig_EQE, n=n, num=num, min_energy = min_energy)
+        
+    return EQE_new
+
+
 # Wrapper function to extend EQE
-def wrapper_extend_EQE(df, samples, n, num=-5, min_energy = 0.5):
+def wrapper_extend_EQE_CT(CT_df, orig_EQE, n, num=-5, min_energy = 0.5):
     """
     Function to feed parameters into 'extend_EQE' function.
-    :param df: DataFrame with information on CT / Opt fit values [dataFrame]
+    :param CT_df: DataFrame with information on CT / Opt fit values [dataFrame]
+    :param orig_EQE: Original EQE data [dataFrame]
     :param samples: List of EQE files [list of dataFrames]
     :param n: Samples to select [int]
     :param num: Number of data points to discard in original EQE spectrum to connect to CT fits [int]
@@ -52,15 +177,14 @@ def wrapper_extend_EQE(df, samples, n, num=-5, min_energy = 0.5):
     """
     
     energy = np.arange(0.5, 2, 0.01)
-    CT_EQE_df = Marcus_Gaussian(energy, df['ECT (eV)'][n], df['l_CT (eV)'][n], df['f_CT (eV2)'][n], df['Eopt (eV)'][n], df['l_opt (eV)'][n], df['f_opt (eV2)'][n], 300)
-    orig_EQE_df = samples[n]
-    EQE_extended = extend_EQE(min_energy, orig_EQE_df, CT_EQE_df, num)
+    CT_EQE_df = Marcus_Gaussian(energy, CT_df['ECT (eV)'][n], CT_df['l_CT (eV)'][n], CT_df['f_CT (eV2)'][n], CT_df['Eopt (eV)'][n], CT_df['l_opt (eV)'][n], CT_df['f_opt (eV2)'][n], 300)
+    EQE_extended = extend_EQE_CT(min_energy, orig_EQE, CT_EQE_df, num)
     
     return EQE_extended 
 
 
 # Function to extend EQE
-def extend_EQE(min_energy, orig_EQE_df, CT_df, num=-5):
+def extend_EQE_CT(min_energy, orig_EQE_df, CT_df, num=-5):
     """
     Function to extend the EQE by Gaussian shape
     :param min_energy: Lowest energy value to extend the EQE to [float]
@@ -83,7 +207,29 @@ def extend_EQE(min_energy, orig_EQE_df, CT_df, num=-5):
     EQE_cropped_df = orig_EQE_df[:][:num]
     EQE_extended = EQE_cropped_df.append(new_df, ignore_index=True)
     
-    plt.semilogy(EQE_extended['Energy'], EQE_extended['EQE'])
-    plt.xlim(0.5, 2.5)
+#     plt.semilogy(EQE_extended['Energy'], EQE_extended['EQE'])
+#     plt.xlim(0.5, 2.5)
     
     return EQE_extended
+
+
+def calculate_infl_point(EQE_df, start=50, stop=80):
+    """
+    Function to determine inflection point of the EQE
+    :param EQE_df : dataFrame with 'Energy' and 'EQE' values [dataFrame]
+    :param start : start value of region of interest [float]
+    :param stop : stop value of region of interest [float]
+    :return infl_dict : dictionary with index and value of inflection point [dict]
+    """
+    Derivative = [(EQE_df['EQE'][x+1]-EQE_df['EQE'][x])/(EQE_df['Energy'][x+1]-EQE_df['Energy'][x]) for x in range(len(EQE_df)-1)]
+    Derivative.append(0)
+    Derivative_2 = [(Derivative[x+1]-Derivative[x])/(EQE_df['Energy'][x+1]-EQE_df['Energy'][x]) for x in range(len(Derivative)-1)]
+    Derivative_2.append(0)
+    EQE_df['Derivative'] = Derivative
+    EQE_df['Second Derivative'] = Derivative_2
+    
+    infl = EQE_df['Energy'][EQE_df['Derivative']==max(EQE_df['Derivative'][start:stop])]
+
+    infl_dict = {'Index':infl.index[0], 'Value':infl.values[0]}
+    
+    return infl_dict
