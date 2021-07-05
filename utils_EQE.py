@@ -73,7 +73,7 @@ def extend_EQE(orig_EQE, mode, min_energy=0.5, **kwargs):
     :param mode : mode / approach to apply to extend EQE
                   "interpolation" - requires kwargs "left", "right" (constants to insert left & right [float])
                   "linear"        - requires kwargs "start", "stop" (min, max energy for linear fit [float])
-                  "inflection"    - requires no kwargs 
+                  "inflection"    - can take kwargs "num", "max_infl" (# points for linear fit [int], max energy for inflection ROI [float])
                   "gaussian"      - requires kwargs "CT_df", "n" (dataFrame with CT fit, and sample number [int])
     :return : EQE_new : interpolated EQE [dataFrame]
     """
@@ -122,8 +122,13 @@ def extend_EQE(orig_EQE, mode, min_energy=0.5, **kwargs):
             num = kwargs['num']
         else:
             num = 5
+            
+        if 'max_infl' in kwargs.keys():
+            max_infl = kwargs['max_infl']
+        else:
+            max_energy = 1.9
         
-        infl = calculate_infl_point(orig_EQE) 
+        infl = calculate_infl_point(EQE_df = orig_EQE, max_energy = max_infl) 
         infl_index = infl['Index']
         max_index = len(orig_EQE)
         
@@ -213,14 +218,21 @@ def extend_EQE_CT(min_energy, orig_EQE_df, CT_df, num=-5):
     return EQE_extended
 
 
-def calculate_infl_point(EQE_df, start=50, stop=80):
+def calculate_infl_point(EQE_df, start=None, stop=None, max_energy=1.9):
     """
     Function to determine inflection point of the EQE
     :param EQE_df : dataFrame with 'Energy' and 'EQE' values [dataFrame]
-    :param start : start value of region of interest [float]
-    :param stop : stop value of region of interest [float]
+    :param start : start index of region of interest [float]
+    :param stop : stop index of region of interest [float]
+    :param max_energy : the maximum energy to consider in region of interest [float]
     :return infl_dict : dictionary with index and value of inflection point [dict]
     """
+    # if no start / stop is given
+    if start is None:
+        start = min(EQE_df[EQE_df['Energy'] < max_energy].index)
+    if stop is None:
+        stop = len(EQE_df)-1
+  
     Derivative = [(EQE_df['EQE'][x+1]-EQE_df['EQE'][x])/(EQE_df['Energy'][x+1]-EQE_df['Energy'][x]) for x in range(len(EQE_df)-1)]
     Derivative.append(0)
     Derivative_2 = [(Derivative[x+1]-Derivative[x])/(EQE_df['Energy'][x+1]-EQE_df['Energy'][x]) for x in range(len(Derivative)-1)]
@@ -228,8 +240,17 @@ def calculate_infl_point(EQE_df, start=50, stop=80):
     EQE_df['Derivative'] = Derivative
     EQE_df['Second Derivative'] = Derivative_2
     
-    infl = EQE_df['Energy'][EQE_df['Derivative']==max(EQE_df['Derivative'][start:stop])]
+    EQE_df.replace([np.inf, -np.inf], np.nan, inplace=True) # replace infinity 
 
-    infl_dict = {'Index':infl.index[0], 'Value':infl.values[0]}
+    index = EQE_df['Derivative'][start:stop].idxmax()
+    infl = EQE_df['Energy'][index]
+
+    infl_dict = {'Index':index, 'Value':infl}
+    
+#     plt.plot(EQE_df['Energy'], EQE_df['EQE'])
+#     plt.plot(EQE_df['Energy'][index], EQE_df['EQE'][index], marker='*', color='tab:orange')
+#     plt.plot(EQE_df['Energy'], EQE_df['Derivative'], color='grey', ls='dotted')
+#     plt.plot(EQE_df['Energy'][start], EQE_df['EQE'][start], marker='o', color='tab:blue')
+#     plt.plot(EQE_df['Energy'][stop], EQE_df['EQE'][stop], marker='o', color='tab:blue')
     
     return infl_dict
