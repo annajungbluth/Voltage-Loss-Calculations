@@ -152,6 +152,7 @@ def Voc_rad(Voc, Jsc, J0_rad):
     return Voc_rad, Delta_Voc_nonrad
 
 
+
 # Voltage losses based on SQ theory (as defined by Uwe Rau)
 def Vloss_SQ(Eg, Voc, Jsc, df=None, voc_rad=None):
     """
